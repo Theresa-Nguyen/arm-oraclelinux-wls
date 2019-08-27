@@ -12,9 +12,132 @@ function usage()
   echo_stderr "./installWeblogic.sh <acceptOTNLicenseAgreement> <otnusername> <otnpassword>"
 }
 
+function setupInstallPath()
+{
+    JDK_PATH="/u01/app/jdk"
+    WLS_PATH="/u01/app/wls"
+    
+    #create custom directory for setting up wls and jdk
+    sudo mkdir -p $JDK_PATH
+    sudo mkdir -p $WLS_PATH
+    
+    sudo rm -rf $JDK_PATH/*
+    sudo rm -rf $WLS_PATH/*
+    
+}
+
+function installUtilities()
+{
+    echo "Installing zip unzip wget vnc-server rng-tools"
+    sudo yum install -y zip unzip wget vnc-server rng-tools
+
+    #Setting up rngd utils
+    sudo systemctl status rngd
+    sudo systemctl start rngd
+    sudo systemctl status rngd
+}
+
+function addOracleGroupAndUser()
+{
+    #add oracle group and user
+    echo "Adding oracle user and group..."
+    groupname="oracle"
+    username="oracle"
+    user_home_dir="/u01/oracle"
+    USER_GROUP=${groupname}
+    sudo groupadd $groupname
+    sudo useradd -d ${user_home_dir} -g $groupname $username
+}
+
+#download jdk from OTN
+function downloadJDK()
+{
+   echo "Downloading jdk from OTN..."
+
+   for in in {1..5}
+   do
+     curl -s https://raw.githubusercontent.com/typekpb/oradown/master/oradown.sh  | bash -s -- --cookie=accept-weblogicserver-server --username="${otnusername}" --password="${otnpassword}" https://download.oracle.com/otn/java/jdk/8u131-b11/d54c1d3a095b4ff2b6607d096fa80163/jdk-8u131-linux-x64.tar.gz
+     tar -tzf jdk-8u131-linux-x64.tar.gz 
+     if [ $? != 0 ];
+     then
+        echo "Download failed. Trying again..."
+        rm -f jdk-8u131-linux-x64.tar.gz
+     else 
+        echo "Downloaded JDK successfully"
+        break
+     fi
+   done
+}
+
+function setupJDK()
+{
+    sudo cp $BASE_DIR/jdk-8u131-linux-x64.tar.gz $JDK_PATH/jdk-8u131-linux-x64.tar.gz
+
+    echo "extracting and setting up jdk..."
+    sudo tar -zxvf $JDK_PATH/jdk-8u131-linux-x64.tar.gz --directory $JDK_PATH
+    sudo chown -R $username:$groupname $JDK_PATH
+
+    export JAVA_HOME=$JDK_PATH/jdk1.8.0_131
+    export PATH=$JAVA_HOME/bin:$PATH
+
+    java -version
+
+    if [ $? == 0 ];
+    then
+        echo "JAVA HOME set succesfully."
+    else
+        echo_stderr "Failed to set JAVA_HOME. Please check logs and re-run the setup"
+        exit 1
+    fi
+}
+
+function setupWLS()
+{
+    sudo cp $BASE_DIR/fmw_12.2.1.3.0_wls_Disk1_1of1.zip $WLS_PATH/fmw_12.2.1.3.0_wls_Disk1_1of1.zip
+    echo "unzipping fmw_12.2.1.3.0_wls_Disk1_1of1.zip..."
+    sudo unzip -o $WLS_PATH/fmw_12.2.1.3.0_wls_Disk1_1of1.zip -d $WLS_PATH
+
+    export SILENT_FILES_DIR=$WLS_PATH/silent-template
+    sudo mkdir -p $SILENT_FILES_DIR
+    sudo rm -rf $WLS_PATH/silent-template/*
+    sudo chown -R $username:$groupname $WLS_PATH
+
+    export INSTALL_PATH="$WLS_PATH/install"
+    export WLS_JAR="$WLS_PATH/fmw_12.2.1.3.0_wls.jar"
+
+    mkdir -p $INSTALL_PATH
+    sudo chown -R $username:$groupname $INSTALL_PATH
+
+    create_oraInstlocTemplate
+    create_oraResponseTemplate
+    create_oraUninstallResponseTemplate
+
+}
+
+#Download Weblogic install jar from OTN
+function downloadWLS()
+{
+  echo "Downloading weblogic install kit from OTN..."
+
+  for in in {1..5}
+  do
+     curl -s https://raw.githubusercontent.com/typekpb/oradown/master/oradown.sh  | bash -s -- --cookie=accept-weblogicserver-server --username="${otnusername}" --password="${otnpassword}" http://download.oracle.com/otn/nt/middleware/12c/12213/fmw_12.2.1.3.0_wls_Disk1_1of1.zip
+     unzip -l fmw_12.2.1.3.0_wls_Disk1_1of1.zip
+     if [ $? != 0 ];
+     then
+        echo "Download failed. Trying again..."
+        rm -f fmw_12.2.1.3.0_wls_Disk1_1of1.zip
+     else 
+        echo "Downloaded WLS successfully"
+        break
+     fi
+  done
+}
+
+
 function validateJDKZipCheckSum()
 {
-  jdkZipFile="$1"
+  jdkZipFile="$BASE_DIR/jdk-8u131-linux-x64.tar.gz"
   jdk18u131Sha256Checksum="62b215bdfb48bace523723cdbb2157c665e6a25429c73828a32f00e587301236"
 
   downloadedJDKZipCheckSum=$(sha256sum $jdkZipFile | cut -d ' ' -f 1)
@@ -195,6 +318,27 @@ function installWLS()
 
 }
 
+function validateInputs()
+{
+    if [ -z "$acceptOTNLicenseAgreement" ];
+    then
+            echo _stderr "acceptOTNLicenseAgreement is required. Value should be either Y/y or N/n"
+            exit 1
+    fi
+
+    if [[ ! ${acceptOTNLicenseAgreement} =~ ^[Yy]$ ]];
+    then
+        echo "acceptOTNLicenseAgreement value not specified as Y/y (yes). Exiting installation Weblogic Server process."
+        exit 1
+    fi
+
+    if [[ -z "$otnusername" || -z "$otnpassword" ]]
+    then
+            echo_stderr "otnusername or otnpassword is required. "
+            exit 1
+    fi
+}
+
 
 #main script starts here
 
@@ -211,107 +355,28 @@ export acceptOTNLicenseAgreement="$1"
 export otnusername="$2"
 export otnpassword="$3"
 
-if [ -z "$acceptOTNLicenseAgreement" ];
-then
-        echo _stderr "acceptOTNLicenseAgreement is required. Value should be either Y/y or N/n"
-        exit 1
-fi
-
-if [[ ! ${acceptOTNLicenseAgreement} =~ ^[Yy]$ ]];
-then
-    echo "acceptOTNLicenseAgreement value not specified as Y/y (yes). Exiting installation Weblogic Server process."
-    exit 1
-fi
-
-if [[ -z "$otnusername" || -z "$otnpassword" ]]
-then
-        echo_stderr "otnusername or otnpassword is required. "
-        exit 1
-fi
-
 export WLS_VER="12.2.1.3.0"
 
-#add oracle group and user
-echo "Adding oracle user and group..."
-groupname="oracle"
-username="oracle"
-user_home_dir="/u01/oracle"
-USER_GROUP=${groupname}
-sudo groupadd $groupname
-sudo useradd -d ${user_home_dir} -g $groupname $username
+validateInputs
 
-JDK_PATH="/u01/app/jdk"
-WLS_PATH="/u01/app/wls"
+addOracleGroupAndUser
 
-#create custom directory for setting up wls and jdk
-sudo mkdir -p $JDK_PATH
-sudo mkdir -p $WLS_PATH
-sudo rm -rf $JDK_PATH/*
-sudo rm -rf $WLS_PATH/*
+setupInstallPath
 
 cleanup
 
-#download jdk from OTN
-echo "Downloading jdk from OTN..."
-curl -s https://raw.githubusercontent.com/typekpb/oradown/master/oradown.sh  | bash -s -- --cookie=accept-weblogicserver-server --username="${otnusername}" --password="${otnpassword}" https://download.oracle.com/otn/java/jdk/8u131-b11/d54c1d3a095b4ff2b6607d096fa80163/jdk-8u131-linux-x64.tar.gz
+installUtilities
 
-validateJDKZipCheckSum $BASE_DIR/jdk-8u131-linux-x64.tar.gz
+downloadJDK
 
-#Download Weblogic install jar from OTN
-echo "Downloading weblogic install kit from OTN..."
-curl -s https://raw.githubusercontent.com/typekpb/oradown/master/oradown.sh  | bash -s -- --cookie=accept-weblogicserver-server --username="${otnusername}" --password="${otnpassword}" http://download.oracle.com/otn/nt/middleware/12c/12213/fmw_12.2.1.3.0_wls_Disk1_1of1.zip
+validateJDKZipCheckSum 
 
-sudo chown -R $username:$groupname /u01/app
+downloadWLS
 
-sudo cp $BASE_DIR/fmw_12.2.1.3.0_wls_Disk1_1of1.zip $WLS_PATH/fmw_12.2.1.3.0_wls_Disk1_1of1.zip
-sudo cp $BASE_DIR/jdk-8u131-linux-x64.tar.gz $JDK_PATH/jdk-8u131-linux-x64.tar.gz
+setupJDK
 
-echo "extracting and setting up jdk..."
-sudo tar -zxvf $JDK_PATH/jdk-8u131-linux-x64.tar.gz --directory $JDK_PATH
-sudo chown -R $username:$groupname $JDK_PATH
-
-export JAVA_HOME=$JDK_PATH/jdk1.8.0_131
-export PATH=$JAVA_HOME/bin:$PATH
-
-java -version
-
-if [ $? == 0 ];
-then
-    echo "JAVA HOME set succesfully."
-else
-    echo_stderr "Failed to set JAVA_HOME. Please check logs and re-run the setup"
-    exit 1
-fi
-
-echo "Installing zip unzip wget vnc-server rng-tools"
-sudo yum install -y zip unzip wget vnc-server rng-tools
-
-#Setting up rngd utils
-sudo systemctl enable rngd 
-sudo systemctl status rngd
-sudo systemctl start rngd
-sudo systemctl status rngd
-
-echo "unzipping fmw_12.2.1.3.0_wls_Disk1_1of1.zip..."
-sudo unzip -o $WLS_PATH/fmw_12.2.1.3.0_wls_Disk1_1of1.zip -d $WLS_PATH
-
-export SILENT_FILES_DIR=$WLS_PATH/silent-template
-sudo mkdir -p $SILENT_FILES_DIR
-sudo rm -rf $WLS_PATH/silent-template/*
-sudo chown -R $username:$groupname $WLS_PATH
-
-export INSTALL_PATH="$WLS_PATH/install"
-export WLS_JAR="$WLS_PATH/fmw_12.2.1.3.0_wls.jar"
-
-mkdir -p $INSTALL_PATH
-sudo chown -R $username:$groupname $INSTALL_PATH
-
-create_oraInstlocTemplate
-create_oraResponseTemplate
-create_oraUninstallResponseTemplate
+setupWLS
 
 installWLS
-
-cleanup
 
 echo "Weblogic Server Installation Completed succesfully."
